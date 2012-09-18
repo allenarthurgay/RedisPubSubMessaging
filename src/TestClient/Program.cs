@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Funq;
+using Olaf;
 using ServiceStack.Messaging;
 using ServiceStack.Redis;
 using ServiceStack.Redis.Messaging;
@@ -87,103 +88,4 @@ namespace TestClient
 		}
 	}
 
-	public static class Extensions
-	{
-		static FieldInfo fieldInfo = typeof(RedisMqHost).GetField("handlerMap", BindingFlags.Instance | BindingFlags.NonPublic);
-
-		public static void PublishToChannel<T>(this IMessageQueueClient client, string channel, T messageBody)
-		{
-			IMessage msg = typeof (IMessage).IsAssignableFrom(typeof (T)) ? (IMessage) messageBody : new Message<T>(messageBody);
-
-			client.Publish(channel + "_" + QueueNames<T>.In, msg.ToBytes());
-		}
-
-		public static void RegisterHandlerToChannel<T>(this RedisMqHost mqHost, string channel, Func<IMessage<T>, object> processMessageFn, Action<IMessage<T>, Exception> processExceptionEx = null)
-		{
-			var handlerMap = (Dictionary<Type, IMessageHandlerFactory>)fieldInfo.GetValue(mqHost);
-
-			if (handlerMap.ContainsKey(typeof(T)))
-			{
-				throw new ArgumentException("Message handler has already been registered for type: " + typeof(T).Name);
-			}
-
-			handlerMap[typeof(T)] = mqHost.CreateMessageHandlerFactory(channel, processMessageFn, processExceptionEx);
-		}
-		
-		private static MessageHandlerPerChannelFactory<T> CreateMessageHandlerFactory<T>(this RedisMqHost mqHost, string channel,
-			Func<IMessage<T>, object> processMessageFn, Action<IMessage<T>, Exception> processExceptionEx)
-		{
-			return new MessageHandlerPerChannelFactory<T>(mqHost, channel, processMessageFn, processExceptionEx)
-			{
-				RequestFilter = mqHost.RequestFilter,
-				ResponseFilter = mqHost.ResponseFilter,
-				RetryCount = mqHost.RetryCount,
-			};
-		}
-	}
-
-    public class MessageHandlerPerChannelFactory<T>
-        : IMessageHandlerFactory
-    {
-        public const int DefaultRetryCount = 2; //Will be a total of 3 attempts
-        private readonly IMessageService messageService;
-	    private readonly string _channel;
-
-	    public Func<IMessage, IMessage> RequestFilter { get; set; }
-        public Func<object, object> ResponseFilter { get; set; }
-
-        private readonly Func<IMessage<T>, object> processMessageFn;
-        private readonly Action<IMessage<T>, Exception> processExceptionFn;
-        public int RetryCount { get; set; }
-		
-        public MessageHandlerPerChannelFactory(IMessageService messageService, string channel, Func<IMessage<T>, object> processMessageFn, Action<IMessage<T>, Exception> processExceptionEx = null)
-        {
-            if (messageService == null)
-                throw new ArgumentNullException("messageService");
-
-	        if (channel == null) 
-				throw new ArgumentNullException("channel");
-
-	        if (processMessageFn == null)
-                throw new ArgumentNullException("processMessageFn");
-
-            this.messageService = messageService;
-	        _channel = channel;
-	        this.processMessageFn = processMessageFn;
-            this.processExceptionFn = processExceptionEx;
-            this.RetryCount = DefaultRetryCount;
-        }
-
-        public IMessageHandler CreateMessageHandler()
-        {
-	        var handler = MessageHandlerImpl();
-
-	        handler.ProcessQueueNames = handler.ProcessQueueNames.Select(name => _channel + "_" + name).ToArray();
-
-	        return handler;
-        }
-
-		private MessageHandler<T> MessageHandlerImpl()
-	    {
-		    if (this.RequestFilter == null && this.ResponseFilter == null)
-		    {
-			    return new MessageHandler<T>(messageService, processMessageFn,
-			                                 processExceptionFn, this.RetryCount);
-		    }
-
-		    return new MessageHandler<T>(messageService, msg =>
-			    {
-				    if (this.RequestFilter != null)
-					    msg = (IMessage<T>) this.RequestFilter(msg);
-
-				    var result = this.processMessageFn(msg);
-
-				    if (this.ResponseFilter != null)
-					    result = this.ResponseFilter(result);
-
-				    return result;
-			    },
-		                                 processExceptionFn, this.RetryCount);
-	    }
-    }
 }
