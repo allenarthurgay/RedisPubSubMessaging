@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Funq;
 using Olaf;
 using ServiceStack.Messaging;
@@ -55,21 +56,24 @@ namespace TestClient
 				MessageId = 7,
 				Request = new Hello { Name = "Client 1" }
 			};
+			//var msg2 = new MessageContext<Hello>
+			//{
+			//	MessageId = 21,
+			//	Request = new Hello { Name = "Client 1" }
+			//};
 
 			cli1.PublishToChannel("channel2", msg);
+			//cli1.PublishToChannelAndWait<MessageContext<Hello>, HelloResponse>("channel2", msg2, callback: response => Console.Out.WriteLine("response=" + response.Result));
 
 			Console.ReadLine();
 		}
 
-		private static IMessageQueueClient CreateClient()
+		private static ResponsiveChannelFriendlyRedisMqClient CreateClient()
 		{
 			var clientRedisFactory = new PooledRedisClientManager("localhost:6379");
-			var redisClient = clientRedisFactory.GetClient();
 			var clientHost = new RedisMqHost(clientRedisFactory);
-			var mqClient = clientHost.CreateMessageQueueClient();
 
-
-			return mqClient;
+			return new ResponsiveChannelFriendlyRedisMqClient(clientHost);
 		}
 
 		private static IMessageService CreateHost(PooledRedisClientManager redisFactory, Container container, string channel)
@@ -85,6 +89,96 @@ namespace TestClient
 
 			mqHost.Start(); //Starts listening for messages
 			return mqHost;
+		}
+	}
+
+	public class ResponsiveChannelFriendlyRedisMqClient : IMessageQueueClient
+	{
+		private RedisMqHost _host;
+		private IMessageQueueClient _innerClient;
+
+
+		public ResponsiveChannelFriendlyRedisMqClient(RedisMqHost host)
+		{
+			if (host == null) throw new ArgumentNullException("host");
+			_host = host;
+
+			_innerClient = _host.CreateMessageQueueClient();
+		}
+
+		private static string BuildChannelName<T>(string channel)
+		{
+			return channel + "_" + QueueNames<T>.In;
+		}
+
+		public void PublishToChannel<T>(string channel, T messageBody)
+		{
+			IMessage msg = typeof(IMessage).IsAssignableFrom(typeof(T)) ? (IMessage)messageBody : new Message<T>(messageBody);
+
+			Publish(BuildChannelName<T>(channel), msg.ToBytes());
+		}
+
+		//public void PublishToChannelAndWait<TRequest, TResponse>(string channel, TRequest messageBody, Action<TResponse> callback = null, TimeSpan? timeOut = null)
+		//{
+		//	if (channel == null) throw new ArgumentNullException("channel");
+
+		//	var msg = typeof (IMessage).IsAssignableFrom(typeof (TRequest))
+		//				  ? (IMessage) messageBody
+		//				  : new Message<TRequest>(messageBody);
+
+		//	//msg.ReplyTo = "hostKey:" + Guid.NewGuid().ToString("N");
+
+		//	PublishToChannel(channel, msg);
+
+		//	new Thread(() =>
+		//		{
+		//			var message = Get(msg.ReplyTo, timeOut).ToMessage<TResponse>();
+
+		//			if (callback != null)
+		//			{
+		//				callback(message.GetBody());
+		//			}
+		//		}).Start();
+		//}
+
+		public void Publish<T>(T messageBody)
+		{
+			_innerClient.Publish(messageBody);
+		}
+
+		public void Publish<T>(IMessage<T> message)
+		{
+			_innerClient.Publish(message);
+		}
+
+		public void Publish(string queueName, byte[] messageBytes)
+		{
+			_innerClient.Publish(queueName, messageBytes);
+		}
+
+		public void Notify(string queueName, byte[] messageBytes)
+		{
+			_innerClient.Notify(queueName, messageBytes);
+		}
+
+		public byte[] Get(string queueName, TimeSpan? timeOut)
+		{
+			return _innerClient.Get(queueName, timeOut);
+		}
+
+		public byte[] GetAsync(string queueName)
+		{
+			return _innerClient.GetAsync(queueName);
+		}
+
+		public string WaitForNotifyOnAny(params string[] channelNames)
+		{
+			return _innerClient.WaitForNotifyOnAny(channelNames);
+		}
+
+		public void Dispose()
+		{
+			_innerClient.Dispose();
 		}
 	}
 
